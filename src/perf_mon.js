@@ -482,7 +482,7 @@ export {};
     interceptAndUpgradeQuality: ['video-quality.js', 'Forces max quality on a video', 'medium'],
     setQualityOnPlayer: ['video-quality.js', 'Calls setPlaybackQualityRange', 'light'],
     setLocalStorageQuality: ['video-quality.js', 'Writes the yt-player-quality key', 'light'],
-    isQualityAlreadyMax: ['video-quality.js', 'Skips work when already maxed', 'free'],
+    getBestAvailableQuality: ['video-quality.js', 'Highest level the video offers', 'free'],
     ensurePlaybackStarts: ['video-quality.js', 'webOS 25 first-play kickstart', 'medium'],
     startStatePolling: ['video-quality.js', 'Fallback 500ms player state poll', 'heavy'],
     stopStatePolling: ['video-quality.js', 'Stops the fallback poll', 'free'],

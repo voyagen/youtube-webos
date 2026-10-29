@@ -7,6 +7,7 @@ npx webpack --mode=production > /tmp/leg.log 2>&1
 E=$(grep -c "^ERROR" /tmp/leg.log); [ "$E" != "0" ] && { echo "LEGACY BUILD ERRORS: $E"; grep "^ERROR" /tmp/leg.log | head -5; }
 echo "--- polyfill conformance ---";  node bench/polyfill-conformance.cjs 2>&1 | tail -2
 echo "--- launcher URL cases ---";    node bench/launch-test.cjs 2>&1 | tail -2
+echo "--- video quality forcing ---"; node --test --test-reporter=tap bench/video-quality-test.cjs 2>&1 | grep -E "^# (pass|fail) "
 echo "--- bundle smoke (webOS 3) ---"; node bench/smoke.cjs dist/webOSUserScripts/userScript.js legacy 2>&1 | tail -2
 echo "--- adblock filters (webOS 3) ---"; node bench/adblock-test.cjs dist/webOSUserScripts/userScript.js legacy 2>&1 | tail -2
 echo "--- modern build smoke (webOS 23+) ---"

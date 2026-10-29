@@ -5,9 +5,9 @@ import { sendKey, REMOTE_KEYS, SELECTORS, isWatchPage } from './utils.js';
 
 const DEBUG = false;
 
-const TARGET_QUALITIES = new Set([
-  'highres', 'hd2160', 'hd1440', 'hd1080', 'hd720', 'large', 'medium', 'small', 'tiny'
-]);
+const TARGET_QUALITIES = [
+  'highres', 'hd2880', 'hd2160', 'hd1440', 'hd1080', 'hd720', 'large', 'medium', 'small', 'tiny'
+];
 
 const IS_WEBOS_25 = isWebOS25();
 const QUALITY_KEY = 'yt-player-quality';
@@ -110,13 +110,16 @@ async function ensurePlaybackStarts() {
   }
 }
 
-function isQualityAlreadyMax() {
-  if (!player) return false;
+// Highest level the current video offers, or null until the player lists
+// levels it recognises (e.g. [] before the manifest loads, or only 'auto').
+function getBestAvailableQuality() {
+  if (!player) return null;
   try {
-    const currentQuality = player.getPlaybackQuality?.();
-    return TARGET_QUALITIES.has(currentQuality);
+    const available = player.getAvailableQualityLevels?.();
+    if (!Array.isArray(available)) return null;
+    return TARGET_QUALITIES.find(quality => available.includes(quality)) || null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -170,7 +173,8 @@ function setLocalStorageQuality() {
   }
 }
 
-function setQualityOnPlayer() {
+// `upgraded` means a switch was requested; notifyIfUpgraded() confirms it.
+function setQualityOnPlayer(best) {
   if (!player || !isForceEnabled() || isDestroyed) {
     return { success: false, upgraded: false };
   }
@@ -180,25 +184,17 @@ function setQualityOnPlayer() {
       return { success: false, upgraded: false };
     }
     
-    if (isQualityAlreadyMax()) {
+    const previousQuality = player.getPlaybackQuality?.();
+    if (previousQuality === best) {
       return { success: true, upgraded: false };
     }
     
-    DEBUG && console.log('[VideoQuality] Upgrading quality from:', player.getPlaybackQuality?.());
+    DEBUG && console.log('[VideoQuality] Upgrading quality from:', previousQuality, 'to:', best);
     
-    player.setPlaybackQualityRange('highres', 'highres');
-    player.setPlaybackQuality?.('highres');
+    player.setPlaybackQualityRange(best, best);
+    player.setPlaybackQuality?.(best);
     
-    const afterQuality = player.getPlaybackQuality?.();
-    const qualityLabel = player.getPlaybackQualityLabel?.();
-    
-    DEBUG && console.info('[VideoQuality] ✅ Quality upgraded to:', afterQuality, qualityLabel);
-    
-    return { 
-      success: true, 
-      upgraded: true,
-      newQuality: qualityLabel || afterQuality
-    };
+    return { success: true, upgraded: true, previousQuality };
     
   } catch (e) {
     DEBUG && console.warn('[VideoQuality] Error setting quality:', e);
@@ -210,25 +206,22 @@ function notifyIfUpgraded(result) {
   if (result && result.upgraded) {
     setTimeout(() => {
       try {
-        const finalQuality = player.getPlaybackQualityLabel?.() || result.newQuality || 'high quality';
+        // The switch is async; stay quiet unless the player actually moved.
+        if (isDestroyed || !player) return;
+        const quality = player.getPlaybackQuality?.();
+        if (!quality || quality === result.previousQuality) return;
+        const finalQuality = player.getPlaybackQualityLabel?.() || quality;
         showNotification(`Video quality upgraded to ${finalQuality}`);
         DEBUG && console.info('[VideoQuality] Notification shown:', finalQuality);
-      } catch {
-        showNotification('Video quality upgraded to high quality');
-      }
+      } catch { /* ignore */ }
     }, 500);
   }
 }
 
-function interceptAndUpgradeQuality(videoId) {
+function interceptAndUpgradeQuality(videoId, best) {
   if (!player || !isForceEnabled() || isDestroyed) return;
   
   if (videoBeingProcessed === videoId) return;
-  
-  if (isQualityAlreadyMax()) {
-    qualitySetForVideo.add(videoId);
-    return;
-  }
   
   videoBeingProcessed = videoId;
   DEBUG && console.info('[VideoQuality] 🛑 Intercepting playback to upgrade quality:', videoId);
@@ -241,7 +234,7 @@ function interceptAndUpgradeQuality(videoId) {
   } catch { /* ignore */ }
   
   requestAnimationFrame(() => {
-    const result = setQualityOnPlayer();
+    const result = setQualityOnPlayer(best);
     
     if (result.success) {
       qualitySetForVideo.add(videoId);
@@ -264,27 +257,22 @@ function handleStateChange(state) {
 
   const actualState = (state && state.data !== undefined) ? state.data : state;
 
-  // Publish FIRST. This event is shared infrastructure: watch.js (clock
-  // visibility) and sponsorblock.js (overlay cache invalidation, observer
-  // re-arm, chain-skip re-arm, high-freq loop teardown) both subscribe to it.
-  // It must not be suppressed by an unrelated quality setting.
+  // State events are shared infrastructure and must not depend on quality forcing.
+  let videoId = null;
+  try {
+    videoId = player.getVideoData?.()?.video_id || null;
+  } catch { /* The player may not have video data yet. */ }
+  const isNewVideo = !!videoId && videoId !== lastVideoId;
+  if (videoId) lastVideoId = videoId;
+
   window.dispatchEvent(new CustomEvent('yt-player-state-change', {
-    detail: { state: actualState, videoId: lastVideoId }
+    detail: { state: actualState, videoId }
   }));
 
-  // Everything below is quality forcing only.
-  if (!_shouldForce) return;
+  if (!_shouldForce || !videoId) return;
 
   try {
-    const videoData = player.getVideoData?.();
-    const videoId = videoData?.video_id;
-    
-    if (!videoId) return;
-    
-    const isNewVideo = videoId !== lastVideoId;
-    
     if (isNewVideo) {
-      lastVideoId = videoId;
       DEBUG && console.info('[VideoQuality] 🎬 New video:', videoId);
       
       if (actualState === STATE_UNSTARTED) {
@@ -297,25 +285,30 @@ function handleStateChange(state) {
       return;
     }
     
-    switch (actualState) {
-        // Identical handling: setQualityOnPlayer() already short-circuits when
-        // the quality is maxed (returning upgraded:false, making
-        // notifyIfUpgraded a no-op), so both cases collapse to one path.
-        case STATE_UNSTARTED:
-        case STATE_BUFFERING:
-            if (isNewVideo && player.getAvailableQualityLevels?.()?.length > 0) {
-                if (!isQualityAlreadyMax()) notifyIfUpgraded(setQualityOnPlayer());
-                qualitySetForVideo.add(videoId);
-            }
-            break;
+    // Until the player lists its levels there is nothing to compare against;
+    // a later state change retries.
+    const best = getBestAvailableQuality();
 
-        case STATE_PLAYING:
-            if (!isQualityAlreadyMax()) {
-                interceptAndUpgradeQuality(videoId);
-            } else {
-                qualitySetForVideo.add(videoId);
-            }
-            break;
+    if (best) {
+      switch (actualState) {
+          // Upgrading while the video isn't playing yet needs no interrupt.
+          // setQualityOnPlayer() short-circuits when already at `best`.
+          case STATE_UNSTARTED:
+          case STATE_BUFFERING: {
+              const result = setQualityOnPlayer(best);
+              if (result.success) qualitySetForVideo.add(videoId);
+              notifyIfUpgraded(result);
+              break;
+          }
+
+          case STATE_PLAYING:
+              if (player.getPlaybackQuality?.() === best) {
+                  qualitySetForVideo.add(videoId);
+              } else {
+                  interceptAndUpgradeQuality(videoId, best);
+              }
+              break;
+      }
     }
 
 	ensurePlaybackStarts();
